@@ -1,4 +1,4 @@
-## replicated_log_v1
+## replicated_log_v2
 
 ### Testing commands:
 - Send the message:
