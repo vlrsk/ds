@@ -2,6 +2,7 @@ import logging
 import os
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from flask import Flask, request, jsonify
@@ -116,12 +117,7 @@ def register_master_routes():
 
         required_acks_from_secondaries = max(0, w - 1)
 
-        acks = 0
-        acks_lock = threading.Lock()
-        acks_cond = threading.Condition(acks_lock)
-
         def replicate_to_secondary(index, secondary_base_url):
-            nonlocal acks
             replicate_url = f"{secondary_base_url.rstrip('/')}/replicate"
             logger.info("Replicating to %s ...", replicate_url)
             try:
@@ -132,66 +128,36 @@ def register_master_routes():
                 )
                 resp.raise_for_status()
                 logger.info("ACK received from %s", secondary_base_url)
-                with acks_cond:
-                    acks += 1
-                    acks_cond.notify_all()
+                return True
             except Exception as e:
                 logger.error("Replication to %s failed: %s", secondary_base_url, e)
                 errors[index] = e
+                return False
+
+        futures = []
+        executor = ThreadPoolExecutor(max_workers=len(SECONDARIES))
 
         for i, secondary_base_url in enumerate(SECONDARIES):
-            t = threading.Thread(
-                target=replicate_to_secondary,
-                args=(i, secondary_base_url),
-                daemon=True,
-            )
-            t.start()
+            futures.append(executor.submit(replicate_to_secondary, i, secondary_base_url))
 
-        if required_acks_from_secondaries == 0:
-            logger.info("w=1 -> not waiting for secondary ACKs")
-            return jsonify({"status": "ok", "id": msg_id, "message": msg}), 201
+        try:
+            if required_acks_from_secondaries == 0:
+                logger.info("w=1 -> not waiting for secondary ACKs")
+                return jsonify({"status": "ok", "id": msg_id, "message": msg}), 201
 
-        deadline = time.time() + HTTP_REPL_TIMEOUT
-        with acks_cond:
-            while acks < required_acks_from_secondaries:
-                remaining = deadline - time.time()
-                if remaining <= 0:
-                    break
-                acks_cond.wait(timeout=remaining)
+            for fut in as_completed(futures):
+                ok = fut.result()
+                if ok:
+                    required_acks_from_secondaries -= 1
 
-        if acks < required_acks_from_secondaries:
-            first_err = None
-            for err in errors:
-                if err is not None:
-                    first_err = str(err)
-                    break
-            if first_err is None:
-                first_err = "Timeout waiting for secondary ACKs"
+                if required_acks_from_secondaries == 0:
+                    return jsonify({"status": "ok", "id": msg_id, "message": msg}), 201
 
-            logger.error(
-                "Write with id=%d failed to reach required w=%d (ACKs=%d)",
-                msg_id,
-                w,
-                acks + 1,
-            )
-            return (
-                jsonify(
-                    {
-                        "error": "Failed to satisfy write concern",
-                        "w": w,
-                        "acks_total": acks + 1,
-                        "details": first_err,
-                    }
-                ),
-                500,
-            )
-        logger.info(
-            "Write with id=%d satisfied write concern w=%d (ACKs total=%d)",
-            msg_id,
-            w,
-            acks + 1,
-        )
-        return jsonify({"status": "ok", "id": msg_id, "message": msg}), 201
+            successful_acks = (w - 1) - required_acks_from_secondaries
+            logger.error("Failed to satisfy write concern w=%d for id=%d: got only %d ACKs from secondaries",w, msg_id, successful_acks)
+            return jsonify({"error": "Failed to satisfy write concern", "w": w, "acks_from_secondaries": successful_acks,}),500
+        finally:
+            executor.shutdown(wait=False)
 
 
 def register_secondary_routes():
