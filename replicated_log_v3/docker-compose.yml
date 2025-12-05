@@ -1,0 +1,41 @@
+services:
+  master:
+    build:
+      context: .
+    image: replicated-log-v3-master
+    container_name: replicated-log-v3-master
+    environment:
+      ROLE: "master"
+      PORT: 5000
+      SECONDARIES: "http://secondary1:5001,http://secondary2:5002"
+    ports:
+      - "5000:5000"
+    depends_on:
+      - secondary1
+      - secondary2
+
+  secondary1:
+    build:
+      context: .
+    image: replicated-log-v3-secondary1
+    container_name: replicated-log-v3-secondary1
+    environment:
+      ROLE: "secondary"
+      PORT: 5001
+      REPLICATION_DELAY: 15
+      INTERNAL_ERROR_PROB: 0
+    ports:
+      - "5001:5001"
+
+  secondary2:
+    build:
+      context: .
+    image: replicated-log-v3-secondary2
+    container_name: replicated-log-v3-secondary2
+    environment:
+      ROLE: "secondary"
+      PORT: 5002
+      REPLICATION_DELAY: 10
+      INTERNAL_ERROR_PROB: 0
+    ports:
+      - "5002:5002"
